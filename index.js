@@ -461,6 +461,8 @@ const parseTrackTitle = (rawTitle, fallbackPart) => {
     /^(.*?)\s*[\[(]\s*(?:track|part|pt\.?|day)\s*[-–—:._ ]?\s*0*(\d+)\s*[\])]$/i,
     /^(.*?)\s*[-–—:._]\s*(?:track|part|pt\.?|day)\s*[-–—:._ ]?\s*0*(\d+)$/i,
     /^(.*?)\s+(?:track|part|pt\.?|day)\s*[-–—:._ ]?\s*0*(\d+)$/i,
+    /^(.*?)\s*[-–—:_ ]?\s*(?:d|day)\s*[-–—:_ ]*0*(\d+)$/i,
+    /^(.*?)\s+(?:d|day)\s*0*(\d+)$/i,
   ];
 
   for (const pattern of patterns) {
@@ -796,22 +798,53 @@ const fetchFromSupabase = async (diagnostics) => {
 };
 
 const fetchFromTelegramUpdates = async (botToken, diagnostics) => {
-  const response = await fetch(
-    `${BOT_API_BASE}/bot${botToken}/getUpdates?allowed_updates=["message","channel_post"]`
-  );
+  const collectedUpdates = [];
+  let offset = 0;
+  let page = 0;
+  const maxPages = 20;
+  const limit = 100;
 
-  if (!response.ok) {
-    throw new Error(`Telegram returned ${response.status}`);
+  while (page < maxPages) {
+    const params = new URLSearchParams({
+      allowed_updates: JSON.stringify(["message", "channel_post"]),
+      limit: String(limit),
+    });
+
+    if (offset > 0) {
+      params.set("offset", String(offset));
+    }
+
+    const response = await fetch(
+      `${BOT_API_BASE}/bot${botToken}/getUpdates?${params.toString()}`
+    );
+
+    if (!response.ok) {
+      throw new Error(`Telegram returned ${response.status}`);
+    }
+
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error(data.description || "Telegram getUpdates failed");
+    }
+
+    const pageUpdates = Array.isArray(data.result) ? data.result : [];
+    collectedUpdates.push(...pageUpdates);
+
+    if (!pageUpdates.length) break;
+
+    offset =
+      pageUpdates[pageUpdates.length - 1].update_id !== undefined
+        ? pageUpdates[pageUpdates.length - 1].update_id + 1
+        : offset;
+
+    page += 1;
+
+    if (pageUpdates.length < limit) break;
   }
 
-  const data = await response.json();
-  if (!data.ok) {
-    throw new Error(data.description || "Telegram getUpdates failed");
-  }
-
-  diagnostics.telegram.updateCount = data.result.length;
+  diagnostics.telegram.updateCount = collectedUpdates.length;
   const teachings = dedupeTeachings(
-    data.result.map(normalizeTelegramUpdate).filter(Boolean),
+    collectedUpdates.map(normalizeTelegramUpdate).filter(Boolean),
     diagnostics
   );
   diagnostics.telegram.normalizedCount = teachings.length;
