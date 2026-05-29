@@ -143,7 +143,6 @@ const getPublicStorageUrl = (supabaseUrl, bucket, storagePath) => {
 const isBlankValue = (value) => value === undefined || value === null || value === "";
 
 const buildSupabaseTeachingRow = (teaching) => ({
-  id: teaching.id,
   series_id: teaching.seriesId,
   series_slug: teaching.seriesId,
   series_name: teaching.seriesTitle,
@@ -898,6 +897,8 @@ const upsertTelegramTeachingsToSupabase = async (teachings, diagnostics) => {
     const existing = existingBySyncKey.get(String(syncKey));
     const payload = buildSupabaseTeachingRow(teaching);
 
+    console.log("payload: ", payload);
+
     if (!existing) {
       const insertResponse = await fetch(`${supabaseUrl}/rest/v1/${tableName}`, {
         method: "POST",
@@ -969,6 +970,7 @@ const loadTeachings = async (request, diagnostics, { syncTelegram = false } = {}
   if (botToken && syncTelegram) {
     console.log(`[teachings:${diagnostics.traceId}] Syncing Telegram teachings into Supabase`);
     const telegramTeachings = await fetchFromTelegramUpdates(botToken, diagnostics);
+    console.log("telegramTeachings: ", telegramTeachings);
 
     if (telegramTeachings.length) {
       const syncResult = await upsertTelegramTeachingsToSupabase(
