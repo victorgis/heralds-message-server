@@ -121,3 +121,47 @@ Point the frontend at the deployed API:
 ```sh
 VITE_TELEGRAM_TEACHINGS_ENDPOINT=https://heralds-message-server-production.up.railway.app/api/teachings
 ```
+
+## Supabase columns
+
+The server reads these columns from `telegram_teachings`:
+
+- `id`
+- `series_id`
+- `series_slug`
+- `series_name`
+- `series_title`
+- `track_title`
+- `message_title`
+- `part`
+- `part_number`
+- `year`
+- `type`
+- `meeting_type`
+- `speaker`
+- `preacher`
+- `duration`
+- `file_id`
+- `telegram_file_id`
+- `file_unique_id`
+- `telegram_file_unique_id`
+- `file_size`
+- `description`
+- `published_at`
+- `created_at`
+- `date`
+- `cover_url`
+- `artwork_url`
+- `audio_url`
+- `storage_url`
+- `public_url`
+- `supabase_url`
+- `stream_url`
+- `storage_bucket`
+- `storage_path`
+- `object_path`
+- `s3_key`
+- `path`
+
+If you want the series artwork to come from Supabase, add `cover_url`.
+If `cover_url` is empty, the frontend uses one shared fallback image for every series.
