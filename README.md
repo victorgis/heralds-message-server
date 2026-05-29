@@ -47,6 +47,7 @@ TELEGRAM_BOT_API_DIR=/var/lib/telegram-bot-api
 VITE_SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 TELEGRAM_TEACHINGS_TABLE=telegram_teachings
+SUPABASE_SYNC_TELEGRAM=true
 ```
 
 ## Docker
@@ -165,3 +166,15 @@ The server reads these columns from `telegram_teachings`:
 
 If you want the series artwork to come from Supabase, add `cover_url`.
 If `cover_url` is empty, the frontend uses one shared fallback image for every series.
+
+## Supabase sync behavior
+
+When `SUPABASE_SYNC_TELEGRAM=true`, the server does this on `/api/teachings`:
+
+1. Reads the current rows from Supabase.
+2. Reads Telegram updates.
+3. Inserts missing rows into Supabase.
+4. Fills only blank Supabase columns from Telegram.
+5. Returns the Supabase rows back to the frontend.
+
+That means Supabase takes precedence for metadata whenever a row already exists there.

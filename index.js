@@ -44,6 +44,8 @@ const TEMP_SUPABASE_MIRROR_MIN_BYTES = Number(
 const SHOULD_USE_TEMP_SUPABASE_MIRROR =
   TEMP_SUPABASE_MIRROR_ENABLED &&
   BOT_API_BASE === TELEGRAM_HOSTED_BOT_API;
+const SHOULD_SYNC_TELEGRAM_TO_SUPABASE =
+  process.env.SUPABASE_SYNC_TELEGRAM !== "false";
 const activeDownloads = new Map();
 
 app.set("trust proxy", true);
@@ -119,6 +121,15 @@ const getSupabaseAdminConfig = () => {
   return { supabaseUrl, supabaseKey };
 };
 
+const getSupabaseTableName = () =>
+  process.env.TELEGRAM_TEACHINGS_TABLE || "telegram_teachings";
+
+const getSupabaseHeaders = (supabaseKey, extraHeaders = {}) => ({
+  apikey: supabaseKey,
+  Authorization: `Bearer ${supabaseKey}`,
+  ...extraHeaders,
+});
+
 const encodeStoragePath = (storagePath) => {
   return storagePath.split("/").map(encodeURIComponent).join("/");
 };
@@ -128,6 +139,46 @@ const getPublicStorageUrl = (supabaseUrl, bucket, storagePath) => {
     storagePath
   )}`;
 };
+
+const isBlankValue = (value) => value === undefined || value === null || value === "";
+
+const buildSupabaseTeachingRow = (teaching) => ({
+  id: teaching.id,
+  series_id: teaching.seriesId,
+  series_slug: teaching.seriesId,
+  series_name: teaching.seriesTitle,
+  series_title: teaching.seriesTitle,
+  track_title: teaching.trackTitle,
+  message_title: teaching.trackTitle,
+  part: teaching.part,
+  part_number: teaching.part,
+  year: teaching.year,
+  type: teaching.type,
+  meeting_type: teaching.type,
+  speaker: teaching.speaker,
+  preacher: teaching.speaker,
+  duration: teaching.duration,
+  file_id: teaching.fileId,
+  telegram_file_id: teaching.fileId,
+  file_unique_id: teaching.fileUniqueId,
+  telegram_file_unique_id: teaching.fileUniqueId,
+  file_size: teaching.fileSize || null,
+  description: teaching.description,
+  published_at: teaching.publishedAt || null,
+  cover_url: teaching.cover || null,
+  artwork_url: teaching.cover || null,
+  audio_url: teaching.storageUrl || null,
+  storage_url: teaching.storageUrl || null,
+  public_url: teaching.storageUrl || null,
+  supabase_url: teaching.storageUrl || null,
+  stream_url: teaching.storageUrl || null,
+});
+
+const getTeachingSyncKey = (teaching) =>
+  teaching.fileUniqueId ||
+  teaching.fileId ||
+  teaching.storageUrl ||
+  `${slugify(teaching.seriesTitle)}:${teaching.part}`;
 
 const getMirrorMetadataDir = () => path.join(CACHE_DIR, ".metadata");
 
@@ -751,8 +802,7 @@ const groupTeachings = (request, teachings) => {
 
 const fetchFromSupabase = async (diagnostics) => {
   const { supabaseUrl, supabaseKey } = getSupabaseConfig();
-  const tableName =
-    process.env.TELEGRAM_TEACHINGS_TABLE || "telegram_teachings";
+  const tableName = getSupabaseTableName();
 
   diagnostics.supabase.tableName = tableName;
   diagnostics.supabase.hasUrl = Boolean(supabaseUrl);
@@ -795,6 +845,116 @@ const fetchFromSupabase = async (diagnostics) => {
   ).length;
 
   return teachings;
+};
+
+const fetchSupabaseRows = async () => {
+  const { supabaseUrl, supabaseKey } = getSupabaseConfig();
+  const tableName = getSupabaseTableName();
+
+  if (!supabaseUrl || !supabaseKey) return [];
+
+  const response = await fetch(`${supabaseUrl}/rest/v1/${tableName}?select=*`, {
+    headers: getSupabaseHeaders(supabaseKey),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Supabase returned ${response.status}`);
+  }
+
+  const rows = await response.json();
+  return Array.isArray(rows) ? rows : [];
+};
+
+const upsertTelegramTeachingsToSupabase = async (teachings, diagnostics) => {
+  const { supabaseUrl, supabaseKey } = getSupabaseAdminConfig();
+  const tableName = getSupabaseTableName();
+
+  if (!supabaseUrl || !supabaseKey) {
+    diagnostics.supabase.syncSkipped = "missing_admin_credentials";
+    return;
+  }
+
+  const existingRows = await fetchSupabaseRows();
+  const existingBySyncKey = new Map();
+
+  for (const row of existingRows) {
+    const syncKey =
+      row.file_unique_id ||
+      row.telegram_file_unique_id ||
+      row.file_id ||
+      row.telegram_file_id ||
+      row.id;
+
+    if (syncKey) {
+      existingBySyncKey.set(String(syncKey), row);
+    }
+  }
+
+  let insertedCount = 0;
+  let patchedCount = 0;
+
+  for (const teaching of teachings) {
+    const syncKey = getTeachingSyncKey(teaching);
+    const existing = existingBySyncKey.get(String(syncKey));
+    const payload = buildSupabaseTeachingRow(teaching);
+
+    if (!existing) {
+      const insertResponse = await fetch(`${supabaseUrl}/rest/v1/${tableName}`, {
+        method: "POST",
+        headers: getSupabaseHeaders(supabaseKey, {
+          "Content-Type": "application/json",
+          Prefer: "return=minimal",
+        }),
+        body: JSON.stringify(payload),
+      });
+
+      if (!insertResponse.ok) {
+        const detail = await insertResponse.text();
+        throw new Error(
+          `Supabase insert failed with ${insertResponse.status}: ${detail.slice(0, 160)}`
+        );
+      }
+
+      insertedCount += 1;
+      continue;
+    }
+
+    const patch = {};
+    for (const [column, value] of Object.entries(payload)) {
+      if (isBlankValue(existing[column]) && !isBlankValue(value)) {
+        patch[column] = value;
+      }
+    }
+
+    if (!Object.keys(patch).length) continue;
+
+    const updateResponse = await fetch(
+      `${supabaseUrl}/rest/v1/${tableName}?id=eq.${encodeURIComponent(existing.id)}`,
+      {
+        method: "PATCH",
+        headers: getSupabaseHeaders(supabaseKey, {
+          "Content-Type": "application/json",
+          Prefer: "return=minimal",
+        }),
+        body: JSON.stringify(patch),
+      }
+    );
+
+    if (!updateResponse.ok) {
+      const detail = await updateResponse.text();
+      throw new Error(
+        `Supabase patch failed with ${updateResponse.status}: ${detail.slice(0, 160)}`
+      );
+    }
+
+    patchedCount += 1;
+  }
+
+  diagnostics.supabase.sync = {
+    insertedCount,
+    patchedCount,
+    processedCount: teachings.length,
+  };
 };
 
 const fetchFromTelegramUpdates = async (botToken, diagnostics) => {
@@ -1140,7 +1300,15 @@ app.get("/api/teachings", async (request, response) => {
     let teachings = await fetchFromSupabase(diagnostics);
     diagnostics.source = teachings.length ? "supabase" : "none";
 
-    if (!teachings.length && botToken) {
+    if (botToken && SHOULD_SYNC_TELEGRAM_TO_SUPABASE) {
+      console.log(`[teachings:${traceId}] Syncing Telegram teachings into Supabase`);
+      const telegramTeachings = await fetchFromTelegramUpdates(botToken, diagnostics);
+      if (telegramTeachings.length) {
+        await upsertTelegramTeachingsToSupabase(telegramTeachings, diagnostics);
+        teachings = await fetchFromSupabase(diagnostics);
+        diagnostics.source = teachings.length ? "supabase" : diagnostics.source;
+      }
+    } else if (!teachings.length && botToken) {
       console.log(
         `[teachings:${traceId}] No Supabase teachings found; falling back to Telegram`
       );
