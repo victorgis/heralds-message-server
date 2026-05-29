@@ -427,15 +427,40 @@ const slugify = (value) => {
     .replace(/^-+|-+$/g, "");
 };
 
+const stripAudioExtension = (value) =>
+  normalizeString(value).replace(/\.(mp3|m4a|ogg|oga|opus|wav|aac)$/i, "");
+
+const extractYearFromText = (value) => {
+  const match = normalizeString(value).match(/(?:^|[^0-9])((?:19|20)\d{2})(?:$|[^0-9])/);
+  return match ? Number(match[1]) : null;
+};
+
+const stripTrailingSeriesNoise = (value) => {
+  let cleaned = normalizeString(value);
+  const dateSuffixPattern =
+    /(?:\s*[\[(]?\s*[-_–—:]*\s*)?\d{1,2}[-./]\d{1,2}[-./]\d{4}\s*[\])]?\s*$/i;
+  const sectionPattern =
+    /\s*[\[(]?\s*(?:track|part|pt\.?|day)\s*[-–—:._ ]?\s*0*\d+\s*[\])]?\s*$/i;
+  const trailingSeparatorPattern = /[\s\-–—:_()[\]]+$/;
+
+  for (let index = 0; index < 6; index += 1) {
+    const before = cleaned;
+    cleaned = cleaned.replace(dateSuffixPattern, "");
+    cleaned = cleaned.replace(sectionPattern, "");
+    cleaned = cleaned.replace(trailingSeparatorPattern, "");
+
+    if (cleaned === before) break;
+  }
+
+  return cleaned || normalizeString(value);
+};
+
 const parseTrackTitle = (rawTitle, fallbackPart) => {
-  const title = normalizeString(
-    rawTitle,
-    `Teaching Track ${fallbackPart}`
-  ).replace(/\.(mp3|m4a|ogg|oga|opus|wav|aac)$/i, "");
+  const title = stripAudioExtension(rawTitle || `Teaching Track ${fallbackPart}`);
   const patterns = [
-    /^(.*?)\s*[\[(]\s*(?:track|part|pt\.?)\s*0*(\d+)\s*[\])]$/i,
-    /^(.*?)\s*[-–—:]\s*(?:track|part|pt\.?)\s*0*(\d+)$/i,
-    /^(.*?)\s+(?:track|part|pt\.?)\s*0*(\d+)$/i,
+    /^(.*?)\s*[\[(]\s*(?:track|part|pt\.?|day)\s*[-–—:._ ]?\s*0*(\d+)\s*[\])]$/i,
+    /^(.*?)\s*[-–—:._]\s*(?:track|part|pt\.?|day)\s*[-–—:._ ]?\s*0*(\d+)$/i,
+    /^(.*?)\s+(?:track|part|pt\.?|day)\s*[-–—:._ ]?\s*0*(\d+)$/i,
   ];
 
   for (const pattern of patterns) {
@@ -443,9 +468,7 @@ const parseTrackTitle = (rawTitle, fallbackPart) => {
 
     if (match) {
       return {
-        seriesTitle: normalizeString(match[1], title)
-          .replace(/[-–—:]+$/g, "")
-          .trim(),
+        seriesTitle: stripTrailingSeriesNoise(match[1]),
         trackTitle: title,
         part: Number(match[2] || fallbackPart),
       };
@@ -453,7 +476,7 @@ const parseTrackTitle = (rawTitle, fallbackPart) => {
   }
 
   return {
-    seriesTitle: title,
+    seriesTitle: stripTrailingSeriesNoise(title),
     trackTitle: title,
     part: Number(fallbackPart),
   };
@@ -539,6 +562,10 @@ const normalizeTeachingRow = async (row, index, diagnostics) => {
   const publishedAt = normalizeString(
     row.published_at || row.created_at || row.date
   );
+  const titleYear =
+    extractYearFromText(row.track_title || row.message_title || row.title) ||
+    extractYearFromText(row.series_name || row.series_title || row.series) ||
+    extractYearFromText(publishedAt);
 
   return {
     id: normalizeString(
@@ -554,9 +581,8 @@ const normalizeTeachingRow = async (row, index, diagnostics) => {
     part,
     year: Number(
       row.year ||
-        (publishedAt
-          ? new Date(publishedAt).getFullYear()
-          : new Date().getFullYear())
+        titleYear ||
+        (publishedAt ? new Date(publishedAt).getFullYear() : new Date().getFullYear())
     ),
     type: normalizeString(row.type || row.meeting_type, "Teaching"),
     speaker: normalizeString(row.speaker || row.preacher, "Heralds Nation"),
@@ -602,6 +628,11 @@ const normalizeTelegramUpdate = (update, index) => {
   const part = Number(
     metadata.part || metadata.part_number || parsedTitle.part
   );
+  const titleYear =
+    extractYearFromText(metadata.title || metadata.track_title || fallbackTitle) ||
+    extractYearFromText(metadata.series || metadata.series_name) ||
+    extractYearFromText(message.caption || "") ||
+    date.getFullYear();
 
   return {
     id: normalizeString(
@@ -618,7 +649,7 @@ const normalizeTelegramUpdate = (update, index) => {
       parsedTitle.trackTitle
     ),
     part,
-    year: Number(metadata.year || date.getFullYear()),
+    year: Number(metadata.year || titleYear),
     type: normalizeString(metadata.type || metadata.meeting_type, "Teaching"),
     speaker: normalizeString(
       metadata.speaker || metadata.preacher || audio.performer,

@@ -34,7 +34,7 @@ The entrypoint forces `TELEGRAM_BOT_API_BASE` to the local in-container address 
 ```sh
 PORT=4000
 PUBLIC_API_BASE_URL=https://heralds-message-server-production.up.railway.app
-ALLOWED_ORIGINS=https://your-frontend-domain.com,http://localhost:5173
+ALLOWED_ORIGINS=https://heralds-message-server-production.up.railway.app,http://localhost:5173
 
 TELEGRAM_BOT_TOKEN=your-bot-token
 TELEGRAM_API_ID=your-telegram-api-id
