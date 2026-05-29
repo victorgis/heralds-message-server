@@ -13,7 +13,7 @@ const express = require("express");
 const app = express();
 
 const BOT_API_BASE =
-  process.env.TELEGRAM_BOT_API_BASE || "https://api.telegram.org";
+  process.env.TELEGRAM_BOT_API_BASE || "http://127.0.0.1:8081";
 const TELEGRAM_HOSTED_BOT_API = "https://api.telegram.org";
 const TELEGRAM_BOT_DOWNLOAD_LIMIT = 20 * 1024 * 1024;
 const PORT = Number(process.env.PORT || 4000);
@@ -41,6 +41,9 @@ const TEMP_SUPABASE_TTL_SECONDS = Number(
 const TEMP_SUPABASE_MIRROR_MIN_BYTES = Number(
   process.env.TEMP_SUPABASE_MIRROR_MIN_BYTES || TELEGRAM_BOT_DOWNLOAD_LIMIT
 );
+const SHOULD_USE_TEMP_SUPABASE_MIRROR =
+  TEMP_SUPABASE_MIRROR_ENABLED &&
+  BOT_API_BASE === TELEGRAM_HOSTED_BOT_API;
 const activeDownloads = new Map();
 
 app.set("trust proxy", true);
@@ -52,6 +55,11 @@ app.use(
         .split(",")
         .map((item) => item.trim())
         .filter(Boolean);
+
+      if (allowedOrigins.includes("*")) {
+        callback(null, true);
+        return;
+      }
 
       if (
         !origin ||
@@ -79,10 +87,18 @@ const normalizeString = (value, fallback = "") => {
   return String(value).trim() || fallback;
 };
 
+const normalizeBaseUrl = (value) => {
+  const normalized = normalizeString(value);
+
+  if (!normalized) return "";
+
+  return normalized.replace(/^https?:\/\/(?=https?:\/\/)/, "");
+};
+
 const getApiBaseUrl = (request) => {
-  return (
+  return normalizeBaseUrl(
     process.env.PUBLIC_API_BASE_URL ||
-    `${request.protocol}://${request.get("host")}`
+      `${request.protocol}://${request.get("host")}`
   ).replace(/\/$/, "");
 };
 
@@ -240,7 +256,7 @@ const uploadSupabaseObject = async (bucket, objectPath, filePath) => {
 };
 
 const getSignedTempMirrorUrl = async (fileId) => {
-  if (!TEMP_SUPABASE_MIRROR_ENABLED) return "";
+  if (!SHOULD_USE_TEMP_SUPABASE_MIRROR) return "";
 
   const manifest = await readMirrorManifest();
   const mirror = manifest[fileId];
@@ -265,7 +281,7 @@ const getSignedTempMirrorUrl = async (fileId) => {
 };
 
 const uploadTempMirror = async (fileId, cachePath, traceId) => {
-  if (!TEMP_SUPABASE_MIRROR_ENABLED) return "";
+  if (!SHOULD_USE_TEMP_SUPABASE_MIRROR) return "";
 
   const stats = await fsp.stat(cachePath);
   if (stats.size < TEMP_SUPABASE_MIRROR_MIN_BYTES) return "";
@@ -670,14 +686,14 @@ const groupTeachings = (request, teachings) => {
       duration: teaching.duration,
       fileId: teaching.fileId,
       fileSize: teaching.fileSize,
-      audioUrl: requiresLocalBotApi
-        ? ""
-        : teaching.storageUrl || getStreamUrl(request, teaching.fileId),
+      audioUrl: teaching.storageUrl || getStreamUrl(request, teaching.fileId),
       source: teaching.storageUrl
         ? "supabase"
-        : requiresLocalBotApi
-        ? "telegram-needs-local-bot-api"
-        : "telegram-cache",
+        : BOT_API_BASE === TELEGRAM_HOSTED_BOT_API &&
+            teaching.fileSize &&
+            teaching.fileSize > TELEGRAM_BOT_DOWNLOAD_LIMIT
+          ? "telegram-needs-local-bot-api"
+          : "telegram-cache",
       unavailableReason: requiresLocalBotApi
         ? "This Telegram file is over 20MB. Set TELEGRAM_BOT_API_BASE to a self-hosted Telegram Bot API server."
         : "",
@@ -826,7 +842,7 @@ const cleanupCache = async () => {
 };
 
 const cleanupTempMirrors = async () => {
-  if (!TEMP_SUPABASE_MIRROR_ENABLED) return;
+  if (!SHOULD_USE_TEMP_SUPABASE_MIRROR) return;
 
   const manifest = await readMirrorManifest();
   const expiredFileIds = Object.entries(manifest)
@@ -1025,6 +1041,7 @@ app.get("/health", (request, response) => {
     cacheTtlSeconds: CACHE_TTL_SECONDS,
     cacheMaxBytes: CACHE_MAX_BYTES,
     tempSupabaseMirrorEnabled: TEMP_SUPABASE_MIRROR_ENABLED,
+    tempSupabaseMirrorActive: SHOULD_USE_TEMP_SUPABASE_MIRROR,
     tempSupabaseBucket: TEMP_SUPABASE_BUCKET,
     tempSupabasePrefix: TEMP_SUPABASE_PREFIX,
     tempSupabaseTtlSeconds: TEMP_SUPABASE_TTL_SECONDS,
@@ -1096,7 +1113,7 @@ app.get("/api/teachings", async (request, response) => {
       .flatMap((item) =>
         item.tracks.map((track) => ({ ...track, seriesTitle: item.title }))
       )
-      .filter((track) => !track.audioUrl)
+      .filter((track) => !track.audioUrl || track.unavailableReason)
       .map((track) => ({
         series: track.seriesTitle,
         title: track.title,
