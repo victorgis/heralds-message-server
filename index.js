@@ -955,6 +955,42 @@ const upsertTelegramTeachingsToSupabase = async (teachings, diagnostics) => {
     patchedCount,
     processedCount: teachings.length,
   };
+
+  return diagnostics.supabase.sync;
+};
+
+const loadTeachings = async (request, diagnostics, { syncTelegram = false } = {}) => {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  diagnostics.telegram.hasBotToken = Boolean(botToken);
+
+  let teachings = await fetchFromSupabase(diagnostics);
+  diagnostics.source = teachings.length ? "supabase" : "none";
+
+  if (botToken && syncTelegram) {
+    console.log(`[teachings:${diagnostics.traceId}] Syncing Telegram teachings into Supabase`);
+    const telegramTeachings = await fetchFromTelegramUpdates(botToken, diagnostics);
+
+    if (telegramTeachings.length) {
+      const syncResult = await upsertTelegramTeachingsToSupabase(
+        telegramTeachings,
+        diagnostics
+      );
+
+      diagnostics.supabase.sync = syncResult;
+      teachings = await fetchFromSupabase(diagnostics);
+      diagnostics.source = teachings.length ? "supabase" : diagnostics.source;
+    }
+  } else if (!teachings.length && botToken) {
+    console.log(
+      `[teachings:${diagnostics.traceId}] No Supabase teachings found; falling back to Telegram`
+    );
+    teachings = await fetchFromTelegramUpdates(botToken, diagnostics);
+    diagnostics.source = teachings.length ? "telegram" : "none";
+  } else if (!teachings.length && !botToken) {
+    diagnostics.telegram.skipped = "missing_telegram_bot_token";
+  }
+
+  return teachings;
 };
 
 const fetchFromTelegramUpdates = async (botToken, diagnostics) => {
@@ -1272,8 +1308,72 @@ app.get("/health", (request, response) => {
   });
 });
 
+const isSyncRequestAuthorized = (request) => {
+  const secret = normalizeString(process.env.SUPABASE_SYNC_SECRET);
+  if (!secret) return true;
+
+  const providedSecret = normalizeString(
+    request.headers["x-sync-key"] || request.query.sync_key
+  );
+
+  return providedSecret === secret;
+};
+
+app.post("/api/sync-teachings", async (request, response) => {
+  const traceId = createTraceId();
+  const diagnostics = {
+    traceId,
+    source: "none",
+    botApiBase: BOT_API_BASE,
+    usesHostedBotApi: BOT_API_BASE === TELEGRAM_HOSTED_BOT_API,
+    supabase: {},
+    storage: {
+      explicitUrlRows: 0,
+      publicUrlRows: 0,
+      signedUrlRows: 0,
+      missingPathRows: 0,
+      missingConfigRows: 0,
+    },
+    telegram: {},
+    droppedRows: [],
+    duplicateRows: [],
+  };
+
+  if (!isSyncRequestAuthorized(request)) {
+    jsonResponse(response, 401, {
+      message: "Unauthorized",
+      traceId,
+    });
+    return;
+  }
+
+  try {
+    console.log(`[sync:${traceId}] Sync requested`);
+    const teachings = await loadTeachings(request, diagnostics, {
+      syncTelegram: true,
+    });
+
+    jsonResponse(response, 200, {
+      ok: true,
+      traceId,
+      source: diagnostics.source,
+      insertedCount: diagnostics.supabase.sync?.insertedCount || 0,
+      patchedCount: diagnostics.supabase.sync?.patchedCount || 0,
+      processedCount: diagnostics.supabase.sync?.processedCount || 0,
+      seriesCount: groupTeachings(request, teachings).length,
+    });
+  } catch (error) {
+    console.error(`[sync:${traceId}] Failed`, error);
+    jsonResponse(response, 500, {
+      ok: false,
+      message: "Sync failed",
+      detail: error.message,
+      traceId,
+    });
+  }
+});
+
 app.get("/api/teachings", async (request, response) => {
-  const botToken = process.env.TELEGRAM_BOT_TOKEN;
   const debug = request.query.debug === "1";
   const traceId = createTraceId();
   const diagnostics = {
@@ -1296,27 +1396,9 @@ app.get("/api/teachings", async (request, response) => {
 
   try {
     console.log(`[teachings:${traceId}] Loading teachings`);
-    diagnostics.telegram.hasBotToken = Boolean(botToken);
-    let teachings = await fetchFromSupabase(diagnostics);
-    diagnostics.source = teachings.length ? "supabase" : "none";
-
-    if (botToken && SHOULD_SYNC_TELEGRAM_TO_SUPABASE) {
-      console.log(`[teachings:${traceId}] Syncing Telegram teachings into Supabase`);
-      const telegramTeachings = await fetchFromTelegramUpdates(botToken, diagnostics);
-      if (telegramTeachings.length) {
-        await upsertTelegramTeachingsToSupabase(telegramTeachings, diagnostics);
-        teachings = await fetchFromSupabase(diagnostics);
-        diagnostics.source = teachings.length ? "supabase" : diagnostics.source;
-      }
-    } else if (!teachings.length && botToken) {
-      console.log(
-        `[teachings:${traceId}] No Supabase teachings found; falling back to Telegram`
-      );
-      teachings = await fetchFromTelegramUpdates(botToken, diagnostics);
-      diagnostics.source = teachings.length ? "telegram" : "none";
-    } else if (!teachings.length && !botToken) {
-      diagnostics.telegram.skipped = "missing_telegram_bot_token";
-    }
+    let teachings = await loadTeachings(request, diagnostics, {
+      syncTelegram: SHOULD_SYNC_TELEGRAM_TO_SUPABASE,
+    });
 
     const teachingCountBeforeDedupe = teachings.length;
     teachings = dedupeTeachings(teachings, diagnostics);

@@ -48,6 +48,7 @@ VITE_SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 TELEGRAM_TEACHINGS_TABLE=telegram_teachings
 SUPABASE_SYNC_TELEGRAM=true
+SUPABASE_SYNC_SECRET=your-sync-secret
 ```
 
 ## Docker
@@ -100,6 +101,7 @@ If your bot was previously using `https://api.telegram.org`, call `logOut` once 
 
 - `GET /health`
 - `GET /api/teachings`
+- `POST /api/sync-teachings`
 - `GET /api/telegram-stream?file_id=...`
 
 ## How streaming works
@@ -178,3 +180,17 @@ When `SUPABASE_SYNC_TELEGRAM=true`, the server does this on `/api/teachings`:
 5. Returns the Supabase rows back to the frontend.
 
 That means Supabase takes precedence for metadata whenever a row already exists there.
+
+## Sync endpoint
+
+Use `POST /api/sync-teachings` to run the sync without waiting for a library request.
+
+It is protected by `SUPABASE_SYNC_SECRET` when that env var is set:
+
+```sh
+curl -X POST \
+  -H "x-sync-key: your-sync-secret" \
+  https://heralds-message-server-production.up.railway.app/api/sync-teachings
+```
+
+If `SUPABASE_SYNC_SECRET` is empty, the endpoint is open, but I recommend keeping the secret set in production.
