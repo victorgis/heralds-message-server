@@ -142,7 +142,15 @@ const getPublicStorageUrl = (supabaseUrl, bucket, storagePath) => {
 
 const isBlankValue = (value) => value === undefined || value === null || value === "";
 
+const getTeachingSyncKey = (teaching) =>
+  teaching.telegramSyncKey ||
+  teaching.fileUniqueId ||
+  teaching.fileId ||
+  teaching.storageUrl ||
+  `${slugify(teaching.seriesTitle)}:${teaching.part}`;
+
 const buildSupabaseTeachingRow = (teaching) => ({
+  telegram_sync_key: getTeachingSyncKey(teaching),
   series_id: teaching.seriesId,
   series_slug: teaching.seriesId,
   series_name: teaching.seriesTitle,
@@ -173,11 +181,20 @@ const buildSupabaseTeachingRow = (teaching) => ({
   stream_url: teaching.storageUrl || null,
 });
 
-const getTeachingSyncKey = (teaching) =>
-  teaching.fileUniqueId ||
-  teaching.fileId ||
-  teaching.storageUrl ||
-  `${slugify(teaching.seriesTitle)}:${teaching.part}`;
+const getSupabaseRowSyncKey = (row) =>
+  normalizeString(
+    row.telegram_sync_key ||
+      row.file_unique_id ||
+      row.telegram_file_unique_id ||
+      row.file_id ||
+      row.telegram_file_id ||
+      row.storage_url ||
+      row.audio_url ||
+      row.public_url ||
+      row.supabase_url ||
+      row.stream_url ||
+      `${normalizeString(row.series_slug || row.series_id || row.series_name || row.series_title || row.title)}:${normalizeString(row.part || row.part_number || "")}`
+  );
 
 const getMirrorMetadataDir = () => path.join(CACHE_DIR, ".metadata");
 
@@ -535,6 +552,7 @@ const parseTrackTitle = (rawTitle, fallbackPart) => {
 };
 
 const getDedupeKey = (teaching) => {
+  if (teaching.telegramSyncKey) return `sync:${teaching.telegramSyncKey}`;
   if (teaching.fileUniqueId) return `unique:${teaching.fileUniqueId}`;
   if (teaching.fileId) return `file:${teaching.fileId}`;
   if (teaching.storageUrl) return `storage:${teaching.storageUrl}`;
@@ -643,6 +661,15 @@ const normalizeTeachingRow = async (row, index, diagnostics) => {
     fileUniqueId: normalizeString(
       row.file_unique_id || row.telegram_file_unique_id
     ),
+    telegramSyncKey: getSupabaseRowSyncKey(row) || getTeachingSyncKey({
+      seriesTitle,
+      part,
+      fileUniqueId: normalizeString(
+        row.file_unique_id || row.telegram_file_unique_id
+      ),
+      fileId,
+      storageUrl,
+    }),
     fileId,
     storageUrl,
     description: normalizeString(
@@ -714,6 +741,20 @@ const normalizeTelegramUpdate = (update, index) => {
       : "Audio",
     fileSize: Number(audio.file_size || 0),
     fileUniqueId: normalizeString(audio.file_unique_id),
+    telegramSyncKey:
+      getSupabaseRowSyncKey({
+        telegram_sync_key: metadata.telegram_sync_key,
+        file_unique_id: audio.file_unique_id,
+        telegram_file_unique_id: audio.file_unique_id,
+        file_id: audio.file_id,
+        telegram_file_id: audio.file_id,
+      }) ||
+      getTeachingSyncKey({
+        seriesTitle,
+        part,
+        fileUniqueId: normalizeString(audio.file_unique_id),
+        fileId: audio.file_id,
+      }),
     fileId: audio.file_id,
     description: normalizeString(
       metadata.description,
@@ -864,6 +905,91 @@ const fetchSupabaseRows = async () => {
   return Array.isArray(rows) ? rows : [];
 };
 
+const cleanupDuplicateSupabaseRows = async (rows, diagnostics) => {
+  const groups = new Map();
+
+  for (const row of rows) {
+    const syncKey = getSupabaseRowSyncKey(row);
+    if (!syncKey) continue;
+
+    if (!groups.has(syncKey)) {
+      groups.set(syncKey, []);
+    }
+
+    groups.get(syncKey).push(row);
+  }
+
+  const duplicateGroups = [...groups.entries()].filter(([, group]) => group.length > 1);
+  if (!duplicateGroups.length) return rows;
+
+  const { supabaseUrl, supabaseKey } = getSupabaseAdminConfig();
+  if (!supabaseUrl || !supabaseKey) return rows;
+
+  let deletedCount = 0;
+
+  for (const [syncKey, group] of duplicateGroups) {
+    const sortedGroup = [...group].sort((first, second) => {
+      const firstScore = Object.values(first).filter(
+        (value) => !isBlankValue(value)
+      ).length;
+      const secondScore = Object.values(second).filter(
+        (value) => !isBlankValue(value)
+      ).length;
+
+      return secondScore - firstScore;
+    });
+
+    const winner = sortedGroup[0];
+    const losers = sortedGroup.slice(1);
+
+    if (!winner.telegram_sync_key) {
+      const patchResponse = await fetch(
+        `${supabaseUrl}/rest/v1/${getSupabaseTableName()}?id=eq.${encodeURIComponent(winner.id)}`,
+        {
+          method: "PATCH",
+          headers: getSupabaseHeaders(supabaseKey, {
+            "Content-Type": "application/json",
+            Prefer: "return=minimal",
+          }),
+          body: JSON.stringify({ telegram_sync_key: syncKey }),
+        }
+      );
+
+      if (!patchResponse.ok) {
+        const detail = await patchResponse.text();
+        throw new Error(
+          `Supabase sync-key backfill failed with ${patchResponse.status}: ${detail.slice(0, 160)}`
+        );
+      }
+    }
+
+    const loserIds = losers.map((row) => row.id).filter(Boolean);
+    if (!loserIds.length) continue;
+
+    const deleteResponse = await fetch(
+      `${supabaseUrl}/rest/v1/${getSupabaseTableName()}?id=in.(${loserIds
+        .map((id) => encodeURIComponent(id))
+        .join(",")})`,
+      {
+        method: "DELETE",
+        headers: getSupabaseHeaders(supabaseKey),
+      }
+    );
+
+    if (!deleteResponse.ok) {
+      const detail = await deleteResponse.text();
+      throw new Error(
+        `Supabase duplicate cleanup failed with ${deleteResponse.status}: ${detail.slice(0, 160)}`
+      );
+    }
+
+    deletedCount += loserIds.length;
+  }
+
+  diagnostics.supabase.cleanedDuplicates = deletedCount;
+  return fetchSupabaseRows();
+};
+
 const upsertTelegramTeachingsToSupabase = async (teachings, diagnostics) => {
   const { supabaseUrl, supabaseKey } = getSupabaseAdminConfig();
   const tableName = getSupabaseTableName();
@@ -873,41 +999,65 @@ const upsertTelegramTeachingsToSupabase = async (teachings, diagnostics) => {
     return;
   }
 
-  const existingRows = await fetchSupabaseRows();
+  const existingRows = await cleanupDuplicateSupabaseRows(
+    await fetchSupabaseRows(),
+    diagnostics
+  );
   const existingBySyncKey = new Map();
 
   for (const row of existingRows) {
-    const syncKey =
-      row.file_unique_id ||
-      row.telegram_file_unique_id ||
-      row.file_id ||
-      row.telegram_file_id ||
-      row.id;
+    const syncKey = getSupabaseRowSyncKey(row);
 
     if (syncKey) {
+      if (!row.telegram_sync_key) {
+        const backfillResponse = await fetch(
+          `${supabaseUrl}/rest/v1/${tableName}?id=eq.${encodeURIComponent(row.id)}`,
+          {
+            method: "PATCH",
+            headers: getSupabaseHeaders(supabaseKey, {
+              "Content-Type": "application/json",
+              Prefer: "return=minimal",
+            }),
+            body: JSON.stringify({ telegram_sync_key: syncKey }),
+          }
+        );
+
+        if (!backfillResponse.ok) {
+          const detail = await backfillResponse.text();
+          throw new Error(
+            `Supabase sync-key backfill failed with ${backfillResponse.status}: ${detail.slice(0, 160)}`
+          );
+        }
+      }
+
       existingBySyncKey.set(String(syncKey), row);
     }
   }
 
+  const seenBatchKeys = new Set();
   let insertedCount = 0;
   let patchedCount = 0;
 
   for (const teaching of teachings) {
     const syncKey = getTeachingSyncKey(teaching);
+    if (seenBatchKeys.has(String(syncKey))) continue;
+    seenBatchKeys.add(String(syncKey));
+
     const existing = existingBySyncKey.get(String(syncKey));
     const payload = buildSupabaseTeachingRow(teaching);
 
-    console.log("payload: ", payload);
-
     if (!existing) {
-      const insertResponse = await fetch(`${supabaseUrl}/rest/v1/${tableName}`, {
-        method: "POST",
-        headers: getSupabaseHeaders(supabaseKey, {
-          "Content-Type": "application/json",
-          Prefer: "return=minimal",
-        }),
-        body: JSON.stringify(payload),
-      });
+      const insertResponse = await fetch(
+        `${supabaseUrl}/rest/v1/${tableName}?on_conflict=telegram_sync_key`,
+        {
+          method: "POST",
+          headers: getSupabaseHeaders(supabaseKey, {
+            "Content-Type": "application/json",
+            Prefer: "return=minimal,resolution=ignore-duplicates",
+          }),
+          body: JSON.stringify(payload),
+        }
+      );
 
       if (!insertResponse.ok) {
         const detail = await insertResponse.text();
@@ -917,6 +1067,10 @@ const upsertTelegramTeachingsToSupabase = async (teachings, diagnostics) => {
       }
 
       insertedCount += 1;
+      existingBySyncKey.set(String(syncKey), {
+        ...payload,
+        id: payload.id,
+      });
       continue;
     }
 
@@ -970,7 +1124,6 @@ const loadTeachings = async (request, diagnostics, { syncTelegram = false } = {}
   if (botToken && syncTelegram) {
     console.log(`[teachings:${diagnostics.traceId}] Syncing Telegram teachings into Supabase`);
     const telegramTeachings = await fetchFromTelegramUpdates(botToken, diagnostics);
-    console.log("telegramTeachings: ", telegramTeachings);
 
     if (telegramTeachings.length) {
       const syncResult = await upsertTelegramTeachingsToSupabase(
