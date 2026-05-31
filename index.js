@@ -46,6 +46,8 @@ const SHOULD_USE_TEMP_SUPABASE_MIRROR =
   BOT_API_BASE === TELEGRAM_HOSTED_BOT_API;
 const SHOULD_SYNC_TELEGRAM_TO_SUPABASE =
   process.env.SUPABASE_SYNC_TELEGRAM !== "false";
+const SUPABASE_FETCH_PAGE_SIZE = 500;
+const SUPABASE_FETCH_MAX_PAGES = 50;
 const activeDownloads = new Map();
 
 app.set("trust proxy", true);
@@ -853,18 +855,51 @@ const fetchFromSupabase = async (diagnostics) => {
     return [];
   }
 
-  const response = await fetch(`${supabaseUrl}/rest/v1/${tableName}?select=*`, {
-    headers: {
-      apikey: supabaseKey,
-      Authorization: `Bearer ${supabaseKey}`,
-    },
-  });
+  const headers = {
+    apikey: supabaseKey,
+    Authorization: `Bearer ${supabaseKey}`,
+  };
+  const rows = [];
+  let offset = 0;
+  let pageCount = 0;
 
-  if (!response.ok) {
-    throw new Error(`Supabase returned ${response.status}`);
+  while (pageCount < SUPABASE_FETCH_MAX_PAGES) {
+    const query = new URLSearchParams({
+      select: "*",
+      order: "id.asc",
+      limit: String(SUPABASE_FETCH_PAGE_SIZE),
+      offset: String(offset),
+    });
+
+    const response = await fetch(
+      `${supabaseUrl}/rest/v1/${tableName}?${query.toString()}`,
+      { headers }
+    );
+
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(
+        `Supabase returned ${response.status}: ${detail.slice(0, 160)}`
+      );
+    }
+
+    const pageRows = await response.json();
+
+    if (!Array.isArray(pageRows)) {
+      throw new Error("Supabase returned an invalid rows payload");
+    }
+
+    rows.push(...pageRows);
+    pageCount += 1;
+
+    if (pageRows.length < SUPABASE_FETCH_PAGE_SIZE) {
+      break;
+    }
+
+    offset += pageRows.length;
   }
 
-  const rows = await response.json();
+  diagnostics.supabase.pagesFetched = pageCount;
   diagnostics.supabase.rowCount = rows.length;
   diagnostics.supabase.sampleRows = rows.slice(0, 5).map(summarizeRow);
 
@@ -893,16 +928,48 @@ const fetchSupabaseRows = async () => {
 
   if (!supabaseUrl || !supabaseKey) return [];
 
-  const response = await fetch(`${supabaseUrl}/rest/v1/${tableName}?select=*`, {
-    headers: getSupabaseHeaders(supabaseKey),
-  });
+  const headers = getSupabaseHeaders(supabaseKey);
+  const rows = [];
+  let offset = 0;
+  let pageCount = 0;
 
-  if (!response.ok) {
-    throw new Error(`Supabase returned ${response.status}`);
+  while (pageCount < SUPABASE_FETCH_MAX_PAGES) {
+    const query = new URLSearchParams({
+      select: "*",
+      order: "id.asc",
+      limit: String(SUPABASE_FETCH_PAGE_SIZE),
+      offset: String(offset),
+    });
+
+    const response = await fetch(
+      `${supabaseUrl}/rest/v1/${tableName}?${query.toString()}`,
+      { headers }
+    );
+
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(
+        `Supabase returned ${response.status}: ${detail.slice(0, 160)}`
+      );
+    }
+
+    const pageRows = await response.json();
+
+    if (!Array.isArray(pageRows)) {
+      throw new Error("Supabase returned an invalid rows payload");
+    }
+
+    rows.push(...pageRows);
+    pageCount += 1;
+
+    if (pageRows.length < SUPABASE_FETCH_PAGE_SIZE) {
+      break;
+    }
+
+    offset += pageRows.length;
   }
 
-  const rows = await response.json();
-  return Array.isArray(rows) ? rows : [];
+  return rows;
 };
 
 const cleanupDuplicateSupabaseRows = async (rows, diagnostics) => {
