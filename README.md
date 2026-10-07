@@ -33,8 +33,8 @@ The entrypoint forces `TELEGRAM_BOT_API_BASE` to the local in-container address 
 
 ```sh
 PORT=4000
-PUBLIC_API_BASE_URL=https://heralds-message-server-production.up.railway.app
-ALLOWED_ORIGINS=https://heralds-message-server-production.up.railway.app,http://localhost:5173
+PUBLIC_API_BASE_URL=https://heralds-message-server.onrender.com
+ALLOWED_ORIGINS=https://heralds-message-server.onrender.com,http://localhost:5173
 
 TELEGRAM_BOT_TOKEN=your-bot-token
 TELEGRAM_API_ID=your-telegram-api-id
@@ -84,7 +84,7 @@ Helpful defaults already set in the blueprint:
 - `TELEGRAM_BOT_API_BASE=http://127.0.0.1:8081`
 - `TELEGRAM_BOT_API_PORT=8081`
 - `TELEGRAM_BOT_API_DIR=/var/lib/telegram-bot-api`
-- `PUBLIC_API_BASE_URL=https://heralds-message-server-production.up.railway.app`
+- `PUBLIC_API_BASE_URL=https://heralds-message-server.onrender.com`
 
 Do not point `TELEGRAM_BOT_API_BASE` at `https://api.telegram.org` in production if you want large files to play.
 
@@ -122,7 +122,7 @@ If your bot was previously using `https://api.telegram.org`, call `logOut` once 
 Point the frontend at the deployed API:
 
 ```sh
-VITE_TELEGRAM_TEACHINGS_ENDPOINT=https://heralds-message-server-production.up.railway.app/api/teachings
+VITE_TELEGRAM_TEACHINGS_ENDPOINT=https://heralds-message-server.onrender.com/api/teachings
 ```
 
 ## Supabase columns
@@ -241,7 +241,7 @@ It is protected by `SUPABASE_SYNC_SECRET` when that env var is set:
 ```sh
 curl -X POST \
   -H "x-sync-key: your-sync-secret" \
-  https://heralds-message-server-production.up.railway.app/api/sync-teachings
+  https://heralds-message-server.onrender.com/api/sync-teachings
 ```
 
 If `SUPABASE_SYNC_SECRET` is empty, the endpoint is open, but I recommend keeping the secret set in production.
